@@ -10,5 +10,5 @@ all: core.c
 	$(CC) -o a.out core.c -lm
 
 clean:
-	rm -rf *.o
+	rm -rf *.o *.xyz
 	rm -f a.out
