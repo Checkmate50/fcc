@@ -23,16 +23,20 @@
 #include <math.h>
 #include <time.h>
 
+#define ARC4RANDOM_MAX     0x100000000
+
 typedef struct {
     double* p; //position (3-d vector)
     double* f; //force (3-d vector)
     double* v; //velocity (3-d vector)
+    double mass;
 } Molecule;
 
 void create_fcc(Molecule* data, int m, double a);
+void zero_momentum(Molecule* molecules, int N);
 double compute_en(Molecule* molecules, double eps, double sig, int index, int size, double L);
 double compute_pair_en(Molecule p1, Molecule p2, double eps, double sig, double* f1, double* f2, double L);
-double md_step(Molecule* molecules, double eps, double sig, int index, int size, double L, double delta_t, double mass);
+double md_step(Molecule* molecules, double eps, double sig, int index, int size, double L, double delta_t);
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
@@ -41,10 +45,10 @@ int main(int argc, char* argv[]) {
     }
     int N, m;
     double a;
-    FILE* ifile,* ofile;
+    FILE* ifile,* ofile,* efile;
     Molecule* molecules;
-    double energy, kinetic;
-    int i, j, count;
+    double energy, kinetic, v;
+    int i, j, k, count;
     srand(time(NULL));
     
     //Read in data
@@ -56,9 +60,10 @@ int main(int argc, char* argv[]) {
     molecules = (Molecule*) malloc(N*sizeof(Molecule));
     for (i = 0; i < N; i++) {
 	molecules[i].p = malloc(3*sizeof(double));
-	//for (j = 0; j < N; j++) {
-	//  molecules[i].p[j] = 0;
-	//}
+	for (j = 0; j < 3; j++) {
+	  molecules[i].p[j] = 0;
+	}
+	molecules[i].mass = 1;
     }
     create_fcc(molecules, m, a);
 
@@ -123,33 +128,44 @@ int main(int argc, char* argv[]) {
 	molecules[i].f = malloc(3*sizeof(double));
 	molecules[i].v = malloc(3*sizeof(double));
 	for (j = 0; j < 3; j++) {
-	    molecules[i].v[j] = (rand() % 2) - 1; //Reset velocity to be 0
+	    //molecules[i].v[j] = 0;
+	    molecules[i].v[j] = ((double)rand() / (RAND_MAX/2)) - 1; //Set velocity kinda randomly	    
 	}
     }
+    
+    zero_momentum(molecules, N);
     for (i = 0; i < N; i++) {
 	compute_en(molecules, 1, 1, i, N, a*m);
     }
+    efile = fopen("energy.txt", "w");
     ofile = fopen("pos_t1.xyz", "w");
     char filename[20];
     for (count = 0; count < 10; count++) {
 	snprintf(filename, 20, "pos_t%i.xyz", count+1);
 	ofile = fopen(filename, "w");
-	fprintf(ofile, "%i\n\n", N);	
+	fprintf(ofile, "%i\n\n", N);
 	for (i = 0; i < 1000; i++) {
 	    energy = 0;
 	    kinetic = 0;
 	    for (j = 0; j < N; j++) {
-		energy += md_step(molecules, 1, 1, j, N, a*m, .001, 1);
-		kinetic += energy*energy/2;
+		energy += md_step(molecules, 1, 1, j, N, a*m, .001);
+		v = 0;
+		for (k = 0; k < 3; k++) {
+		    v += pow(molecules[j].v[k], 2);
+		}
+		kinetic += molecules[j].mass*v/2;
 	    }
-	    printf("%f\t%f\t%f\n", energy, kinetic, energy+kinetic);
+	    if (i % 100 == 0) {
+		fprintf(efile, "%f\t%f\t%f\n", energy, kinetic, energy+kinetic);
+	    }
 	}
 	for (j = 0; j < N; j++) {
 	    fprintf(ofile, "C\t%f\t%f\t%f\n", molecules[j].p[0], molecules[j].p[1], molecules[j].p[2]);
 	}
-    
+	printf("%i\n", count);
 	fclose(ofile);
     }
+    fclose(efile);
     for (i = 0; i < N; i++) {
 	free(molecules[i].p);
 	free(molecules[i].v);
@@ -165,6 +181,7 @@ int main(int argc, char* argv[]) {
 void create_fcc(Molecule* data, int m, double a) {
     int i, j, k, I , J;
     double b = a / 2; //For equation simplicity
+    int N = 4*m*m*m;
     //Below, we iterate through each "cell" in the crystal
     //Observe that we are we creating a cube of cells
     //The array access patterns allows us to have 4 atoms per cell
@@ -192,6 +209,31 @@ void create_fcc(Molecule* data, int m, double a) {
 }
 
 /*
+ * Sets the center of mass momentum for the given molecules to zero
+ */
+void zero_momentum(Molecule* molecules, int N) {
+    int i, j;
+    double M;
+    double* VCM;
+    M = 0;
+    VCM = malloc(3*sizeof(double));
+    for (i = 0; i < 3; i++) {
+	VCM[i] = 0;
+    }
+    for (i = 0; i < N; i++) {
+	M += molecules[i].mass;
+	for (j = 0; j < 3; j++) {
+	    VCM[j] += molecules[i].mass*molecules[i].v[j];
+	}
+    }
+    for (i = 0; i < N; i++) {
+	for (j = 0; j < 3; j++) {
+	    molecules[i].v[j] -= M*VCM[j]/(N*molecules[i].mass);
+	}
+    }
+}
+
+/*
  * Computes the total energy and forces acting on the molecule given by index
  * Uses the list of molecules, excluding the given index
  * Stores the forces acting on the given molecule in the associated 'f'
@@ -201,7 +243,7 @@ double compute_en(Molecule* molecules, double eps, double sig, int index, int si
     Molecule m = molecules[index];
     double* force;
     double* temp_force;
-    double energy;
+    double energy, e;
     int i, j;
     force = malloc(3*sizeof(double));
     temp_force = malloc(3*sizeof(double));
@@ -213,7 +255,10 @@ double compute_en(Molecule* molecules, double eps, double sig, int index, int si
 	if (i == index) {
 	    continue;
 	}
-	energy += compute_pair_en(m, molecules[i], eps, sig, force, temp_force, L);
+	e = compute_pair_en(m, molecules[i], eps, sig, force, temp_force, L);
+	if (i > index) {
+	    energy += e;
+	}
 	for (j = 0; j < 3; j++) {
 	    m.f[j] += force[j];
 	}
@@ -231,19 +276,16 @@ double compute_pair_en(Molecule p1, Molecule p2, double eps, double sig, double*
     double r, X, Y, Z;
     double a, b;
     int i;
-    int phi = 0;
     for (i = 0; i < 3; i++) {
 	pos2[i] = p2.p[i];
     }
     if (L > 0) {
 	for (i = 0; i < 3; i++) {
-	    if ((p1.p[i] - p2.p[i]) > L/2) {
+	    if ((p1.p[i] - p2.p[i]) < -L/2) {
 		pos2[i] -= L;
-		phi = 1;
 	    }
-	    else if ((p1.p[i] - p2.p[i]) < L/2) {
+	    else if ((p1.p[i] - p2.p[i]) > L/2) {
 		pos2[i] += L; 
-		phi = 2;
 	    }
 	}
     }
@@ -251,6 +293,7 @@ double compute_pair_en(Molecule p1, Molecule p2, double eps, double sig, double*
     Y = p1.p[1]-pos2[1];
     Z = p1.p[2]-pos2[2];
     r = sqrt(X*X+Y*Y+Z*Z);
+    
 
     //Fill in values for forces
     a = (12*pow(sig, 12)*(pos2[0]-p1.p[0]))/pow(r, 14);
@@ -278,14 +321,14 @@ double compute_pair_en(Molecule p1, Molecule p2, double eps, double sig, double*
  * These new values are stored in the molecule itself
  * Returns the potential energy of the given molecule at time t + delta_t
  */
-double md_step(Molecule* molecules, double eps, double sig, int index, int size, double L, double delta_t, double mass) {
+double md_step(Molecule* molecules, double eps, double sig, int index, int size, double L, double delta_t) {
     Molecule m;
     double energy;
     int i;
     m = molecules[index];
     //Calculate the new position
     for (i = 0; i < 3; i++) {
-	m.p[i] = m.p[i] + m.v[i]*delta_t + m.f[i]*(pow(delta_t, 2)/(2*mass));
+	m.p[i] = m.p[i] + m.v[i]*delta_t + m.f[i]*(pow(delta_t, 2)/(2*m.mass));
 	if (m.p[i] >= L) {
 	    m.p[i] -= L;
 	}
@@ -295,15 +338,17 @@ double md_step(Molecule* molecules, double eps, double sig, int index, int size,
     }
     //Calculate half-step velocity
     for (i = 0; i < 3; i++) {
-	m.v[i] = m.v[i] + m.f[i]*(delta_t/(2*mass));
+	m.v[i] = m.v[i] + m.f[i]*(delta_t/(2*m.mass));
     }
 
     //Calculate the new forces
     energy = compute_en(molecules, eps, sig, index, size, L);
 
     //Calculate the new velocities
+    //printf("index: %i\n\tPosition\tVelocity\tForce\n", index);
     for (i = 0; i < 3; i++) {
-	m.v[i] = m.v[i] + m.f[i]*(delta_t/(2*mass));
+	m.v[i] = m.v[i] + m.f[i]*(delta_t/(2*m.mass));
+//	printf("%c:\t%f\t%f\t%f\n", (char) ((int) 'X') + i, m.p[i], m.v[i], m.f[i]);
     }
 
     return energy;
